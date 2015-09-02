@@ -1,0 +1,513 @@
+#!/usr/bin/ruby -w
+$:.unshift File.join(File.dirname(__FILE__), '..', 'lib')
+
+require 'distem'
+require 'optparse'
+require 'pp'
+require 'pathname'
+
+DEFAULT_COPY_PATH="/tmp"
+
+USAGE="Usage: #{$0} --coordinator [host=HOSTNAME,[port=PORT]] option"
+
+def sub_opts_to_hash(sub_opts)
+  return Hash[*sub_opts.split(',').collect { |sub| sub.scan(/(.*?)=(.*)/) }.flatten]
+end
+
+def check_opts(opt, subopts, required, optional)
+  required.each { |r|
+    if not subopts.has_key?(r)
+      puts "The mandatory sub-option #{r} must be set with --#{opt}"
+      return false
+    end
+  }
+  subopts.each_key { |k|
+    if not(required.include?(k) || optional.include?(k))
+      puts "The sub-option #{k} is not supported with --#{opt}"
+      return false
+    end
+  }
+  return true
+end
+
+options = {}
+options['f_options'] = []
+options['host'] = 'localhost'
+options['port'] = 4567
+options['format'] = nil
+options['file'] = nil
+options['pnode'] = nil
+options['vnode'] = nil
+options['command'] = nil
+options['user'] = 'root'
+options['src'] = nil
+options['dest'] = nil
+options['vnetwork'] = nil
+options['viface'] = nil
+options['max_vifaces'] = nil
+options['address'] = nil
+options['latency'] = nil
+options['bw'] = nil
+options['direction'] = nil
+options['corenb'] = nil
+options['cpu_speed'] = nil
+options['unit'] = nil
+options['rootfs' ] = nil
+options['vnetsrc' ] = nil
+options['vnetdest' ] = nil
+options['gateway' ] = nil
+options['configfile'] = nil
+options['sshprivkey'] = nil
+options['sshpubkey'] = nil
+options['mem'] = nil
+options['swap'] = nil
+
+optparse = OptionParser.new(USAGE) do |opts|
+  opts.on('-h', '--help', 'Display this screen' ) do
+    puts opts
+    exit
+  end
+  opts.on(
+    '--coordinator host=HOST[,port=PORT]',
+    'Specify the HOST and the PORT of the coordinator'
+  ) do |str|
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('coordinator', h, ['host'], ['port'])
+    options.update(h)
+  end
+  opts.separator "Physical node management:"
+  opts.on(
+    '--init-pnode PNODE1[,PNODE2,...,PNODEN]',
+    'Init the physical node(s)'
+  ) do |str|
+    options['f_options'] << 'init_pnode'
+    options['pnode'] = str.split(',')
+  end
+  opts.on(
+    '--max-vifaces NB',
+    'Set the maximum number of vifaces on a physical node (used only with --init-pnode)'
+  ) do |str|
+    options['max_vifaces'] = str
+  end
+  opts.on('--quit [PNODE]', 'Close the given PNODE or all the physical nodes' ) do |str|
+    options['f_options'] << 'quit'
+    options['pnode'] = str if str
+  end
+  opts.separator "Virtual node management:"
+  opts.on(
+    '--create-vnode vnode=VNODE,rootfs=FILE[,pnode=PNODE,sshprivkey=FILE,sshpubkey=FILE]',
+    'Create the virtual node VNODE deploying FILE'
+  ) do |str|
+    options['f_options'] << 'create_vnode'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('create-vnode', h, ['vnode','rootfs'], ['pnode','sshprivkey','sshpubkey'])
+    options.update(h)
+  end
+  opts.on(
+    '--start-vnode VNODE',
+    'Start the virtual node VNODE'
+  ) do |str|
+    options['f_options'] << 'start_vnode'
+    options['vnode'] = str
+  end
+  opts.on(
+    '--stop-vnode VNODE',
+    'Stop the virtual node VNODE'
+  ) do |str|
+    options['f_options'] << 'stop_vnode'
+    options['vnode'] = str
+  end
+  opts.on(
+    '--remove-vnode [VNODE]',
+    'Remove VNODE or all the vnodes if VNODE is not specified'
+  ) do |str|
+    options['f_options'] << 'remove_vnode'
+    options['vnode'] = str
+  end
+  opts.separator "File system management:"
+  opts.on(
+    '--copy-to vnode=VNODE,src=SRC,dest=DEST[,user=USER]', \
+    'Copy the file SRC on host to DEST on VNODE'
+  ) do |str|
+    options['f_options'] << 'copy_to'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('copy-to', h, ['vnode','src','dest'], ['user'])
+    options.update(sub_opts_to_hash(str))
+  end
+  opts.on(
+    '--copy-from vnode=VNODE,src=SRC,dest=DEST[,user=USER]',
+    'Copy the file SRC on VNODE to DEST on host'
+  ) do |str|
+    options['f_options'] << 'copy_from'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('copy-from', h, ['vnode','src','dest'], ['user'])
+    options.update(h)
+  end
+  opts.on(
+    '--get-image vnode=VNODE[,dest=DIRECTORY]',
+    'Get a compressed image file of the filesystem of VNODE'
+  ) do |str|
+    options['f_options'] << 'get_image'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('get-image', h, ['vnode'],['dest'])
+    options.update(h)
+  end
+  opts.on(
+    '--shell VNODE',
+    'Open a shell on VNODE'
+  ) do |str|
+    options['f_options'] << 'shell'
+    options['vnode'] = str
+  end
+  opts.on(
+    '--execute vnode=VNODE,command=COMMAND[,user=USER]',
+    'Execute a command COMMAND on VNODE'
+  ) do |str|
+    options['f_options'] << 'execute'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('execute', h, ['vnode','command'], ['user'])
+    options.update(h)
+  end
+  opts.separator "Network management:"
+  opts.on(
+    '--create-vnetwork vnetwork=VNET,address=ADDRESS',
+    'Create VNET with ADDRESS (ip/mask or ip/prefix)'
+  ) do |str|
+    options['f_options'] << 'create_vnetwork'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('create-vnetwork', h, ['vnetwork','address'], [])
+    options.update(h)
+  end
+  opts.on(
+    '--remove-vnetwork [VNET]',
+    'Remove VNET or all the vnetworks if VNET is not specified'
+  ) do |str|
+    options['f_options'] << 'remove_vnetwork'
+    options['vnetwork'] = str if str
+  end
+  opts.on(
+    '--create-viface vnode=VNODE,iface=IFACE[,vnetwork=VNET,address=ADDRESS]',
+    'Create VIFACE on VNODE'
+  ) do |str|
+    options['f_options'] << 'create_viface'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('create-viface', h, ['vnode','iface'], ['vnetwork','address'])
+    options.update(h)
+  end
+  opts.on(
+    '--remove-viface vnode=VNODE,iface=IFACE',
+    'Remove VIFACE on VNODE'
+  ) do |str|
+    options['f_options'] << 'remove_viface'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('remove-viface', h, ['vnode','iface'], [])
+    options.update(h)
+  end
+  opts.on(
+    '--create-vroute vnetsrc=VNETSRC,vnetdest=VNETDEST,gateway=IP',
+    'Create a route between VNETSRC et VNETDST (names) using IP as a gateway (affect all the vnodes in VNETSRC)'
+  ) do |str|
+    options['f_options'] << 'create_vroute'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('create-vroute', h, ['vnetsrc','vnetdest','gateway'], [])
+    options.update(h)
+  end
+  opts.on(
+    '--complete-vroutes',
+    'Create every possible route for each vnode'
+  ) do
+    options['f_options'] << 'complete_vroutes'
+  end
+  opts.on(
+    '--config-viface vnode=VNODE,iface=IFACE[,bw=VALUE|unlimited,latency=VALUE|none,direction=INPUT|OUTPUT]',
+    'Set a bandwidth or a latency limitation on IFACE with a given value and eventually a given direction'
+  ) do |str|
+    options['f_options'] << 'config_viface'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('config-viface', h, ['vnode','iface'], ['bw','latency','direction'])
+    options.update(h)
+  end
+  opts.separator "Memory management:"
+  opts.on(
+    '--set-vmem vnode=VNODE,mem=SIZE,swap=SIZE',
+    'Set a memory limitation (SIZE is supposed to be specified in MB)'
+  ) do |str|
+    options['f_options'] << 'set_vmem'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('set_vmem', h, ['vnode'], ['mem','swap'])
+    options.update(h)
+  end
+  opts.separator "CPU management:"
+  opts.on(
+    '--set-vcpu vnode=VNODE,corenb=NB,cpu_speed=VAL|unlimited,unit=mhz|ratio',
+    'Set a virtual CPU on VNODE with NB cores clocked at SPEED mhz or percent (if not specified, unit is mhz)'
+  ) do |str|
+    options['f_options'] << 'set_vcpu'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('set_vcpu', h, ['vnode','corenb','cpu_speed'], ['unit'])
+    options.update(h)
+  end
+  opts.on(
+    '--config-vcpu vnode=VNODE,cpu_speed=VAL|unlimited,unit=mhz|ratio',
+    'Update the clock of the virtual CPU on VNODE (if not specified, unit is mhz)'
+  ) do |str|
+    options['f_options'] << 'update_vcpu'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('update_vcpu', h, ['vnode','cpu_speed'], ['unit'])
+    options.update(h)
+  end
+  opts.separator "Getting some information:"
+  opts.on(
+    '--get-pnode-info [PNODE]',
+    'Show information about PNODE if specified, or about all the physical nodes'
+  ) do |str|
+    options['f_options'] << 'get_pnode_info'
+    options['pnode'] = str if str
+  end
+  opts.on(
+    '--get-vnode-info [VNODE]',
+    'Show information about VNODE if specified, or about all the virtual nodes'
+  ) do |str|
+    options['f_options'] << 'get_vnode_info'
+    options['vnode'] = str if str
+  end
+  opts.on(
+    '--get-vnetwork-info [VNET]',
+    'Show information about VNET if specified, or about all the virtual networks'
+  ) do |str|
+    options['f_options'] << 'get_vnetwork_info'
+    options['vnetwork'] = str if str
+  end
+  opts.separator "Global platform management:"
+  opts.on(
+    '--set-global-etchosts',
+    'Set a global /etc/hosts file on every virtual nodes'
+  ) do
+    options['f_options'] << 'set_global_etchosts'
+  end
+  opts.on(
+    '--set-global-arptable',
+    'Set a global ARP table on every virtual nodes'
+  ) do
+    options['f_options'] << 'set_global_arptable'
+  end
+  opts.on(
+    '--save-config [configfile=FILE]',
+    'Save the virtual platform in JSON (if configfile is not specified, save to STDOUT)') do |str|
+    options['f_options'] << 'save_config'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('load_config', h, [], ['configfile'])
+    options.update(h)
+  end
+  opts.on(
+    '--load-config format=JSON|SIMGRID[,configfile=FILE,rootfs=FILE]',
+    'Load the virtual platform from the given format(if configfile is not specified, load from STDIN)'
+  ) do |str|
+    options['f_options'] << 'load_config'
+    h = sub_opts_to_hash(str)
+    exit 1 if not check_opts('load_config', h, ['format'], ['configfile','rootfs'])
+    options.update(h)
+  end
+end
+
+begin
+  optparse.parse!
+rescue OptionParser::MissingArgument,OptionParser::InvalidOption => err
+  puts err
+  exit 1
+end
+
+unless ARGV.length == 0
+  puts USAGE
+  exit
+end
+
+if options['f_options'].length == 0
+  puts 'Choose at least one option'
+  puts USAGE
+  exit 1
+end
+
+cl = Distem::NetAPI::Client.new(options['host'],options['port'])
+
+options['f_options'].each { |option|
+  case option
+  when 'init_pnode'
+    pp cl.pnode_init(options['pnode'],options['max_vifaces'] ? {:max_vifaces =>options['max_vifaces']} : {})
+  when 'create_vnode'
+    props = {}
+    props['vfilesystem'] = {}
+    props['vfilesystem']['image'] = options['rootfs']
+    props['host'] = options['pnode'] if options['pnode']
+    ssh_key = {}
+    ssh_key['private'] = IO.readlines(options['sshprivkey']).join() if options['sshprivkey']
+    ssh_key['public'] = IO.readlines(options['sshpubkey']).join() if options['sshpubkey']
+    pp cl.vnode_create(options['vnode'], props, ssh_key)
+  when 'start_vnode'
+    pp cl.vnode_start(options['vnode'])
+  when 'stop_vnode'
+    pp cl.vnode_stop(options['vnode'])
+  when 'remove_vnode'
+    if options['vnode']
+      pp cl.vnode_remove(options['vnode'])
+    else
+      pp cl.vnodes_remove()
+    end
+  when 'shell'
+    vnode = cl.vnode_info(options['vnode'])
+    system("ssh -t #{options['user']}@#{vnode['host']} 'lxc-console -n #{options['vnode']}'")
+  when 'execute'
+    puts cl.vnode_execute(options['vnode'],options['command']).join("\n")
+  when 'copy_to','copy_from'
+    vnode = cl.vnode_info(options['vnode'])
+    pnode = vnode['host']
+    rootfs = vnode['vfilesystem']['shared'] ?
+      vnode['vfilesystem']['sharedpath'] : vnode['vfilesystem']['path']
+    vfile = (option == 'copy_to') ? vfile = options['dest'] : vfile = options['src']
+    path = Pathname.new(vfile)
+    path = File.join(rootfs,(path.absolute? ? "" : DEFAULT_COPY_PATH),path.to_s)
+    if option == 'copy_to'
+      system("scp -r #{options['src']} #{options['user']}@#{pnode}:#{path}")
+    else
+      system("scp -r #{options['user']}@#{pnode}:#{path} #{options['dest']}")
+    end
+  when 'get_image'
+    vnode = cl.vnode_info(options['vnode'])
+    cl2 = Distem::NetAPI::Client.new(vnode['host'],4568)
+    cl2.vfilesystem_image(vnode['name'],options['dest'])
+  when 'create_vnetwork'
+    pp cl.vnetwork_create(options['vnetwork'],options['address'])
+  when 'remove_vnetwork'
+    if options['vnetwork']
+      pp cl.vnetwork_remove(options['vnetwork'])
+    else
+      pp cl.vnetworks_remove()
+    end
+  when 'create_viface'
+    params = {}
+    if options['vnetwork']
+      params['vnetwork'] = options['vnetwork']
+    elsif options['address']
+      params['address'] = options['address']
+    end
+    pp cl.viface_create(options['vnode'], options['iface'],params)
+  when 'remove_viface'
+    pp cl.viface_remove(options['vnode'], options['iface'])
+  when 'create_vroute'
+    pp cl.vroute_create(options['vnetsrc'],options['vnetdest'],options['gateway'])
+  when 'complete_vroutes'
+    pp cl.vroute_complete()
+  when 'config_viface'
+    if (options['bw'] || options['latency']) then
+      vnode = cl.vnode_info(options['vnode'])
+      viface_addr = vnode['vifaces'].collect{ |vif| vif['name'] == options['iface'] }.include?(true)
+      if not viface_addr
+        puts 'The address of the virtual interface cannot be found'
+        exit 1
+      end
+
+      if options['direction'] and !['input','output'].include?(options['direction'].downcase)
+        puts "Invalid direction '#{options['direction']}'"
+        exit 1
+      end
+
+      tmplimit = {}
+      if options['bw'] then
+        if (options['bw'] != 'unlimited') && !Distem::Resource::Bandwidth.is_valid(options['bw'])
+          puts "Could not parse bandwidth units: #{options['bw']}"
+          exit 1
+        end
+        tmplimit['bandwidth'] = (options['bw'] != 'unlimited') ? { "rate" => options['bw'] } : {}
+      end
+      if options['latency'] then
+        if (options['latency'] != 'none') && !Distem::Resource::Latency.is_valid(options['latency'])
+          puts "Could not parse latency units: #{options['latency']}"
+          exit 1
+        end
+        tmplimit['latency'] = (options['latency'] != 'none') ? { "delay" => options['latency'] } : {}
+      end
+      params = {}
+      if options['direction']
+        params[options['direction']] = tmplimit
+      else
+        params['input'] = tmplimit
+        params['output'] = tmplimit
+      end
+      pp cl.viface_update(options['vnode'], options['iface'], params)
+    else
+      puts 'At lease one of the two parameters bw or latency must be set'
+      exit 1
+    end
+  when 'set_vcpu'
+    if options['cpu_speed'] == 'unlimited'
+      val = 1
+      unit = 'ratio'
+    else
+      val = options['cpu_speed']
+      unit = options['unit'] ? options['unit'] : 'mhz'
+    end
+    pp cl.vcpu_create(options['vnode'], val, unit, options['corenb'])
+  when 'update_vcpu'
+    if options['cpu_speed'] == 'unlimited'
+      val = 1
+      unit = 'ratio'
+    else
+      val = options['cpu_speed']
+      unit = options['unit'] ? options['unit'] : 'mhz'
+    end
+    pp cl.vcpu_update(options['vnode'], val, unit)
+  when 'set_vmem'
+    pp cl.vmem_create(options['vnode'], options['mem'], options['swap'])
+  when 'get_pnode_info'
+    if options['pnode']
+      pp cl.pnode_info(options['pnode'])
+    else
+      pp cl.pnodes_info()
+    end
+  when 'get_vnode_info'
+    if options['vnode']
+      pp cl.vnode_info(options['vnode'])
+    else
+      pp cl.vnodes_info()
+    end
+  when 'get_vnetwork_info'
+    if options['vnetwork']
+      pp cl.vnetwork_info(options['vnetwork'])
+    else
+      pp cl.vnetworks_info()
+    end
+  when 'save_config'
+    ret = cl.vplatform_info()
+    if options['configfile']
+      File.open(options['configfile'],'w') { |f| f.puts(ret) }
+    else
+      puts ret
+    end
+  when 'load_config'
+    str = ""
+    if options['configfile']
+      if File.exist?(options['configfile'])
+        str = File.read(options['configfile'])
+      else
+        puts "File '#{options['configfile']}' not found !"
+        exit 1
+      end
+    else
+      str = STDIN.read
+    end
+    pp cl.vplatform_create(str,options['format'],options['rootfs'])
+  when 'set_global_etchosts'
+    cl.set_global_etchosts()
+  when 'set_global_arptable'
+    cl.set_global_arptable(nil,nil)
+  when 'quit'
+    if options['pnode']
+      pp cl.pnode_quit(options['pnode'])
+    else
+      pp cl.pnodes_quit()
+    end
+  else
+    puts "Invalid option: #{option}"
+    exit 1
+  end
+}
